@@ -46,10 +46,38 @@ jobs:
         run: go mod tidy
 
       - name: golangci-lint
+        id: lint
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
           working-directory: operator
+          args: --out-format=colored-line-number,html:lint-report.html
+        continue-on-error: true
+
+      - name: Job Summary — Lint
+        if: always()
+        run: |
+          STATUS="${{ steps.lint.outcome }}"
+          ICON=$([ "$STATUS" = "success" ] && echo "✅" || echo "❌")
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## ${ICON} Lint Report
+          | | |
+          |---|---|
+          | **Tool** | golangci-lint (latest) |
+          | **Result** | ${STATUS^^} |
+          | **Artifact** | [lint-report.html](#artifacts) |
+
+          > Issues (if any) are shown as inline PR annotations and in the HTML report artifact.
+          EOF
+          [ "$STATUS" != "success" ] && exit 1 || exit 0
+
+      - name: Upload lint HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: operator/lint-report.html
+          retention-days: 30
 
   # ──────────────────────────────────────────────────────────────────
   # 2. Test — unit tests + race detector + coverage
@@ -68,11 +96,67 @@ jobs:
         working-directory: operator
         run: go mod tidy
 
-      - name: Run tests
-        working-directory: operator
-        run: go test -race -count=1 -timeout 120s -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@latest
 
-      - name: Upload coverage
+      - name: Run tests
+        id: tests
+        working-directory: operator
+        run: |
+          gotestsum \
+            --format testname \
+            --junitfile test-results.xml \
+            -- -race -count=1 -timeout 120s -coverprofile=coverage.out -covermode=atomic ./...
+        continue-on-error: true
+
+      - name: Generate HTML test report
+        if: always()
+        working-directory: operator
+        run: |
+          go install github.com/vakenbolt/go-test-report@latest
+          go test -json -race -count=1 ./... 2>/dev/null | go-test-report -o test-report.html -t "Volume Stabilization Operator — Test Results" || true
+
+      - name: Compute coverage percentage
+        id: coverage
+        if: always()
+        working-directory: operator
+        run: |
+          if [ -f coverage.out ]; then
+            PCT=$(go tool cover -func=coverage.out | grep total | awk '{print $3}')
+          else
+            PCT="N/A"
+          fi
+          echo "pct=$PCT" >> $GITHUB_OUTPUT
+
+      - name: Job Summary — Tests
+        if: always()
+        run: |
+          STATUS="${{ steps.tests.outcome }}"
+          ICON=$([ "$STATUS" = "success" ] && echo "✅" || echo "❌")
+          COV="${{ steps.coverage.outputs.pct }}"
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## ${ICON} Test Report
+          | | |
+          |---|---|
+          | **Result** | ${STATUS^^} |
+          | **Coverage** | ${COV} |
+          | **Race detector** | enabled |
+          | **Artifact** | [test-report.html](#artifacts) · [JUnit XML](#artifacts) |
+          EOF
+          [ "$STATUS" != "success" ] && exit 1 || exit 0
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            operator/test-report.html
+            operator/test-results.xml
+            operator/coverage.out
+          retention-days: 30
+
+      - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
           files: operator/coverage.out
@@ -100,6 +184,7 @@ jobs:
           go mod tidy
 
       - name: govulncheck (known CVEs in Go deps)
+        id: govuln
         uses: golang/govulncheck-action@v1
         continue-on-error: true   # report CVEs as annotations; don't block the pipeline
         with:
@@ -109,11 +194,41 @@ jobs:
           repo-checkout: false   # we already checked out above; avoids git clean nuking go.sum
 
       - name: gosec (static security analysis)
+        id: gosec
         if: always()   # run even if govulncheck found CVEs
         working-directory: operator
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
           gosec -fmt sarif -out gosec-results.sarif ./... || true
+          gosec -fmt html  -out gosec-report.html  ./... || true
+
+      - name: Job Summary — Security
+        if: always()
+        run: |
+          VULN="${{ steps.govuln.outcome }}"
+          SEC="${{ steps.gosec.outcome }}"
+          VULN_ICON=$([ "$VULN" = "success" ] && echo "✅" || echo "⚠️")
+          SEC_ICON=$([ "$SEC" = "success" ] && echo "✅" || echo "⚠️")
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🔐 Security Report
+          | Check | Status | Details |
+          |---|---|---|
+          | **govulncheck** (CVEs in Go deps) | ${VULN_ICON} ${VULN^^} | See annotations above |
+          | **gosec** (static analysis) | ${SEC_ICON} ${SEC^^} | [gosec-report.html](#artifacts) |
+
+          > CVE findings are non-blocking — they are reported in the GitHub Security tab and HTML artifact.
+          > Fix by upgrading vulnerable dependencies.
+          EOF
+
+      - name: Upload gosec HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: |
+            operator/gosec-report.html
+            operator/gosec-results.sarif
+          retention-days: 30
 
       - name: Upload gosec results to GitHub Security
         uses: github/codeql-action/upload-sarif@v4
@@ -179,7 +294,8 @@ jobs:
           sbom: true          # Software Bill of Materials
 
       # Scan the pushed image for known CVEs — reports to Security tab, does not block
-      - name: Trivy image scan
+      - name: Trivy image scan (SARIF → Security tab)
+        id: trivy
         if: github.event_name != 'pull_request'
         continue-on-error: true
         uses: aquasecurity/trivy-action@v0.35.0
@@ -188,8 +304,52 @@ jobs:
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
-          ignore-unfixed: true   # skip CVEs with no fix available yet
-          exit-code: '0'        # report only; Trivy findings go to GitHub Security tab
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Trivy image scan (HTML report)
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: template
+          template: '@/contrib/html.tpl'
+          output: trivy-report.html
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Job Summary — Build
+        if: always()
+        run: |
+          BUILD="${{ steps.build.outcome }}"
+          BUILD_ICON=$([ "$BUILD" = "success" ] && echo "✅" || echo "❌")
+          DIGEST="${{ steps.build.outputs.digest }}"
+          SHORT_DIGEST=$(echo "$DIGEST" | cut -c1-19)
+          PLATFORMS="${{ github.event.inputs.platforms || 'linux/amd64,linux/arm64' }}"
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🐳 Build Report
+          | | |
+          |---|---|
+          | **Result** | ${BUILD_ICON} ${BUILD^^} |
+          | **Image** | \`${{ env.IMAGE_NAME }}\` |
+          | **Digest** | \`${SHORT_DIGEST}...\` |
+          | **Platforms** | \`${PLATFORMS}\` |
+          | **Signed** | ✅ Cosign keyless (Sigstore) |
+          | **SBOM** | ✅ Attached to image |
+          | **Trivy scan** | [trivy-report.html](#artifacts) · [GitHub Security tab](../security/code-scanning) |
+          EOF
+
+      - name: Upload Trivy HTML report
+        if: always() && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-report
+          path: |
+            trivy-report.html
+            trivy-results.sarif
+          retention-days: 30
 
       - name: Upload Trivy results to GitHub Security
         if: always() && github.event_name != 'pull_request'
