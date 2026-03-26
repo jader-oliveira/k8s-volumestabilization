@@ -1,0 +1,16 @@
+apiVersion: synology.csi.io/v1
+kind: VolumeStabilization
+metadata:
+  name: stabilize-my-test-data
+  namespace: default
+spec:
+  sourcePVC:
+    name: my-data-dynamic
+    namespace: default
+  target:
+    pvcName: my-data
+    namespace: default
+  preserveAnnotations: true
+  preserveLabels: true
+  waitForDeletion: true
+

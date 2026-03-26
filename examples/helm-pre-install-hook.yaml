@@ -1,0 +1,117 @@
+# HELM INTEGRATION: Pre-Install Hook Pattern
+# ===========================================
+# This example shows how to use VolumeStabilization as a Helm pre-install hook
+# so that by the time Helm deploys your workload, the stable PVC already exists.
+#
+# Helm hook execution order (controlled by hook-weight, lower = earlier):
+#   weight -5  → PVC created first (dynamic, gets random NFS folder name)
+#   weight  0  → VolumeStabilization CR created, operator stabilizes it
+#   (no weight) → Normal workload resources deployed using the stable PVC name
+#
+# IMPORTANT: The operator must already be installed before `helm install`.
+# Install it once cluster-wide:
+#   kubectl apply -f crds/volumestabilization-crd.yaml
+#   kubectl apply -k config/
+#
+# --- Copy these templates into your Helm chart's templates/ directory ---
+
+---
+# templates/storage-pvc.yaml
+# Created first (hook-weight -5). This is the "seed" PVC that the CSI driver
+# provisions. It will be replaced by the stable PVC after stabilization.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: '{{ .Release.Name }}-data-dynamic'
+  namespace: '{{ .Release.Namespace }}'
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: nfs-synology
+
+---
+# templates/volumestabilization.yaml
+# Created second (hook-weight 0). The operator deletes the dynamic PVC/PV and
+# creates a new PV/PVC with the stable name. Helm waits for this job to complete
+# before deploying normal workload resources.
+apiVersion: synology.csi.io/v1
+kind: VolumeStabilization
+metadata:
+  name: '{{ .Release.Name }}-stabilize'
+  namespace: '{{ .Release.Namespace }}'
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  sourcePVC:
+    name: '{{ .Release.Name }}-data-dynamic'
+    namespace: '{{ .Release.Namespace }}'
+  target:
+    pvcName: '{{ .Release.Name }}-data'   # ← The stable predictable name
+    namespace: '{{ .Release.Namespace }}'
+  waitForDeletion: true
+
+---
+# templates/deployment.yaml  (excerpt — normal resource, no hook annotation)
+# Uses the stable PVC name. By the time Helm applies this, the VolumeStabilization
+# hook has already completed and the stable PVC exists.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: '{{ .Release.Name }}'
+  template:
+    metadata:
+      labels:
+        app: '{{ .Release.Name }}'
+    spec:
+      containers:
+      - name: app
+        image: nginx:alpine
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: '{{ .Release.Name }}-data'   # ← Stable name, always available
+
+# --- Alternative: Helm values + Kustomize (for charts that support existingClaim) ---
+#
+# If the chart has an `existingClaim` value, skip dynamic provisioning entirely:
+#
+#   helm install myapp ./chart \
+#     --set persistence.existingClaim=my-stable-data
+#
+# If the chart doesn't support existingClaim, apply a Kustomize patch after rendering:
+#
+#   # kustomization.yaml
+#   patches:
+#   - target:
+#       kind: Deployment
+#       name: myapp
+#     patch: |
+#       - op: replace
+#         path: /spec/template/spec/volumes/0/persistentVolumeClaim/claimName
+#         value: my-stable-data
+#
+# --- Alternative: Post-renderer script ---
+#
+#   #!/bin/bash
+#   # helm-post-render.sh — patches any PVC claim name to the stable name
+#   cat <&0 | sed 's/claimName: .*-data-dynamic/claimName: my-stable-data/'
+#
+#   helm install myapp ./chart --post-renderer ./helm-post-render.sh

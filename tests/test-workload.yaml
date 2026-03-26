@@ -1,0 +1,70 @@
+# END-TO-END TEST: Two-Phase Deployment
+# =======================================
+# This test validates the correct two-phase workflow.
+# Run phases in order — do NOT apply everything at once.
+#
+# PHASE 1 — Storage only (no workload yet):
+#   kubectl apply -f tests/test-workload.yaml --selector phase=1
+#   kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/my-test-data-dynamic \
+#     -n default --timeout=120s
+#
+# Then apply the VolumeStabilization CR:
+#   kubectl apply -f tests/test-volumestabilization.yaml
+#   kubectl wait --for=jsonpath='{.status.phase}'=Bound \
+#     volumestabilization/stabilize-my-test-data -n default --timeout=120s
+#
+# PHASE 2 — Workload (uses stable PVC name):
+#   kubectl apply -f tests/test-workload.yaml --selector phase=2
+#   kubectl wait --for=condition=ready pod -l app=test-app -n default --timeout=60s
+#
+# Verify:
+#   kubectl get pvc -n default            # should show my-test-data (Bound), no dynamic one
+#   kubectl exec -n default deploy/test-app -- ls /data    # should work
+
+---
+# PHASE 1: Create the dynamic PVC — no workload mounts it yet
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-data-dynamic
+  namespace: default
+  labels:
+    phase: "1"
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: nfs-synology
+
+---
+# PHASE 2: Workload referencing the STABLE PVC name only
+# Apply this AFTER VolumeStabilization reaches phase=Bound
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app
+  namespace: default
+  labels:
+    phase: "2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-app
+  template:
+    metadata:
+      labels:
+        app: test-app
+    spec:
+      containers:
+      - name: app
+        image: nginx:alpine
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: my-data  # ← STABLE name, set after stabilization

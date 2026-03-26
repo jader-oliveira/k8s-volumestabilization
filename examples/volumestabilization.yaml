@@ -1,0 +1,25 @@
+# Example VolumeStabilization CR
+# This stabilizes the dynamically created PVC to a predictable name
+apiVersion: synology.csi.io/v1
+kind: VolumeStabilization
+metadata:
+  name: stabilize-my-app-data
+  namespace: default
+spec:
+  # Reference to the dynamically created PVC
+  sourcePVC:
+    name: my-app-data-dynamic  # The PVC created by CSI driver
+    namespace: default         # Optional, defaults to CR namespace
+  
+  # Target configuration for the stabilized volume
+  target:
+    pvcName: my-app-data       # Your desired predictable PVC name
+    namespace: default         # Optional, defaults to source namespace
+    # pvName: my-custom-pv     # Optional: custom PV name (auto-generated if not specified)
+  
+  # Preserve original PVC metadata
+  preserveAnnotations: true
+  preserveLabels: true
+  
+  # Wait for original PVC/PV to be fully deleted before creating new ones
+  waitForDeletion: true

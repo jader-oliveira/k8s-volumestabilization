@@ -1,0 +1,101 @@
+# Example: stabilize a dynamically-provisioned PVC
+#
+# WORKFLOW
+# --------
+# 1. Your app starts and creates a dynamic PVC (e.g. via a Helm chart or StorageClass).
+#    The PVC gets an ugly auto-generated name like "my-app-data-dynamic".
+#
+# 2. You apply this file to rename it to a stable, predictable name.
+#    The operator will:
+#      - Capture the PV info
+#      - Delete only the old PVC (NOT the PV — data is safe on the NAS)
+#      - Clear the PV's claimRef so it becomes Available
+#      - Create a new PVC with your chosen name, statically bound to the same PV
+#
+# 3. From that point on:
+#    - Your Deployment/StatefulSet just uses claimName: my-app-data
+#    - If the PVC ever gets deleted, the operator recreates it automatically
+#      (same PV, same data, no new NAS folder)
+#
+# STEP 1 — Create a dynamic PVC first (simulates what a Helm chart/app would do)
+# -------------------------------------------------------------------------------
+# kubectl apply -f example-usage.yaml --selector step=dynamic-pvc
+# kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/my-app-data-dynamic \
+#   -n default --timeout=120s
+#
+# STEP 2 — Apply the VolumeStabilization CR
+# ------------------------------------------
+# kubectl apply -f example-usage.yaml --selector step=stabilize
+# kubectl wait --for=jsonpath='{.status.phase}'=Bound \
+#   volumestabilization/stabilize-my-app-data -n default --timeout=120s
+#
+# After this, pvc/my-app-data-dynamic is gone and pvc/my-app-data is Bound.
+#
+# STEP 3 — Deploy your workload using the stable PVC name
+# --------------------------------------------------------
+# kubectl apply -f example-usage.yaml --selector step=workload
+# kubectl wait --for=condition=ready pod -l app=my-app -n default --timeout=60s
+
+---
+# STEP 1: dynamic source PVC (created initially — e.g. by a Helm chart)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-app-data-dynamic
+  namespace: default
+  labels:
+    step: dynamic-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: nfs-synology   # <-- adjust to your StorageClass
+
+---
+# STEP 2: VolumeStabilization CR — renames dynamic PVC to stable name
+apiVersion: synology.csi.io/v1
+kind: VolumeStabilization
+metadata:
+  name: stabilize-my-app-data
+  namespace: default
+  labels:
+    step: stabilize
+spec:
+  sourcePVC:
+    name: my-app-data-dynamic   # the ugly dynamic name to replace
+    namespace: default
+  target:
+    pvcName: my-app-data        # the stable name your app will always use
+    namespace: default
+
+---
+# STEP 3: workload — only references the stable PVC name
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: default
+  labels:
+    step: workload
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+      - name: app
+        image: nginx:alpine
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: my-app-data   # stable name — always exists as long as VS CR exists

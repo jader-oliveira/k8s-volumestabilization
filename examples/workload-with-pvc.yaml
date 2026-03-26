@@ -1,0 +1,62 @@
+# TWO-PHASE DEPLOYMENT APPROACH
+# ==============================
+# The timing problem: if you apply the PVC, VolumeStabilization, AND Deployment
+# all at once, the Deployment mounts the dynamic PVC which the operator then
+# deletes — breaking your workload.
+#
+# The solution is two phases:
+#   Phase 1 (this file): storage only — create the PVC, stabilize it.
+#   Phase 2 (workload.yaml): deploy the workload using the STABLE PVC name.
+#
+# --- PHASE 1: Apply this file first ---
+#
+#   kubectl apply -f examples/workload-with-pvc.yaml
+#   kubectl wait --for=jsonpath='{.status.phase}'=Bound \
+#     pvc/my-app-data-dynamic -n default --timeout=120s
+#   kubectl apply -f examples/volumestabilization.yaml
+#   kubectl wait --for=jsonpath='{.status.phase}'=Bound \
+#     volumestabilization/stabilize-my-app-data -n default --timeout=120s
+#
+# Then proceed to Phase 2 (workload.yaml).
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-app-data-dynamic
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: nfs-synology  # Your Synology CSI storage class
+---
+# --- PHASE 2: Apply AFTER stabilization reaches phase=Bound ---
+# The Deployment (and any other workload) must reference the STABLE name,
+# never the dynamic one. Only deploy this after Phase 1 is complete.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+      - name: app
+        image: nginx:alpine
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: my-app-data  # ← STABLE name, not the dynamic one

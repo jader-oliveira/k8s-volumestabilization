@@ -1,0 +1,72 @@
+# Example for StatefulSet with multiple PVCs
+# Each PVC needs its own VolumeStabilization CR
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: my-stateful-app
+  namespace: default
+spec:
+  serviceName: my-stateful-app
+  replicas: 3
+  selector:
+    matchLabels:
+      app: my-stateful-app
+  template:
+    metadata:
+      labels:
+        app: my-stateful-app
+    spec:
+      containers:
+      - name: app
+        image: nginx:alpine
+        volumeMounts:
+        - name: data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteMany"]
+      resources:
+        requests:
+          storage: 1Gi
+      storageClassName: nfs-synology
+
+# After the StatefulSet creates PVCs, you would create VolumeStabilization CRs:
+# data-my-stateful-app-0 -> data-my-stateful-app-0-stable
+# data-my-stateful-app-1 -> data-my-stateful-app-1-stable
+# data-my-stateful-app-2 -> data-my-stateful-app-2-stable
+---
+# Example stabilization for StatefulSet PVCs
+apiVersion: synology.csi.io/v1
+kind: VolumeStabilization
+metadata:
+  name: stabilize-data-0
+  namespace: default
+spec:
+  sourcePVC:
+    name: data-my-stateful-app-0
+  target:
+    pvcName: data-my-stateful-app-0-stable
+---
+apiVersion: synology.csi.io/v1
+kind: VolumeStabilization
+metadata:
+  name: stabilize-data-1
+  namespace: default
+spec:
+  sourcePVC:
+    name: data-my-stateful-app-1
+  target:
+    pvcName: data-my-stateful-app-1-stable
+---
+apiVersion: synology.csi.io/v1
+kind: VolumeStabilization
+metadata:
+  name: stabilize-data-2
+  namespace: default
+spec:
+  sourcePVC:
+    name: data-my-stateful-app-2
+  target:
+    pvcName: data-my-stateful-app-2-stable

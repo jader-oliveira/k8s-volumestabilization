@@ -1,0 +1,160 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: volumestabilizations.synology.csi.io
+  labels:
+    app.kubernetes.io/name: volume-stabilization-operator
+    app.kubernetes.io/component: crd
+spec:
+  group: synology.csi.io
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - sourcePVC
+                - target
+              properties:
+                sourcePVC:
+                  type: object
+                  description: "Reference to the dynamically provisioned PVC to stabilize"
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: "Name of the source PVC (dynamically created by CSI)"
+                    namespace:
+                      type: string
+                      description: "Namespace of the source PVC (defaults to CR namespace)"
+                target:
+                  type: object
+                  description: "Target configuration for the stabilized volume"
+                  required:
+                    - pvcName
+                  properties:
+                    pvcName:
+                      type: string
+                      description: "Desired name for the stabilized PVC"
+                    namespace:
+                      type: string
+                      description: "Namespace for the stabilized PVC (defaults to source namespace)"
+                    pvName:
+                      type: string
+                      description: "Optional: specific name for the PV (auto-generated if not specified)"
+                    storageClassName:
+                      type: string
+                      description: "Storage class for the new PVC (defaults to empty for static binding)"
+                preserveAnnotations:
+                  type: boolean
+                  default: true
+                  description: "Preserve annotations from the original PVC"
+                preserveLabels:
+                  type: boolean
+                  default: true
+                  description: "Preserve labels from the original PVC"
+                waitForDeletion:
+                  type: boolean
+                  default: true
+                  description: "Wait for original PVC/PV to be fully deleted before creating new ones"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: ["Pending", "Discovering", "Capturing", "DeletingOriginal", "Creating", "Bound", "Failed"]
+                  default: "Pending"
+                  description: "Current phase of the stabilization process"
+                originalPV:
+                  type: object
+                  description: "Information about the original PV"
+                  properties:
+                    name:
+                      type: string
+                    server:
+                      type: string
+                    path:
+                      type: string
+                    storage:
+                      type: string
+                    accessModes:
+                      type: array
+                      items:
+                        type: string
+                    storageClassName:
+                      type: string
+                    reclaimPolicy:
+                      type: string
+                    mountOptions:
+                      type: array
+                      items:
+                        type: string
+                newPV:
+                  type: object
+                  description: "Information about the new stabilized PV"
+                  properties:
+                    name:
+                      type: string
+                newPVC:
+                  type: object
+                  description: "Information about the new stabilized PVC"
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                message:
+                  type: string
+                  description: "Status message or error details"
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                observedGeneration:
+                  type: integer
+                  description: "The generation observed by the controller"
+      additionalPrinterColumns:
+        - name: Source PVC
+          type: string
+          jsonPath: .spec.sourcePVC.name
+          description: Original PVC name
+        - name: Target PVC
+          type: string
+          jsonPath: .spec.target.pvcName
+          description: New PVC name
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+          description: Current phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+  scope: Namespaced
+  names:
+    plural: volumestabilizations
+    singular: volumestabilization
+    kind: VolumeStabilization
+    shortNames:
+      - vs
+      - volstab

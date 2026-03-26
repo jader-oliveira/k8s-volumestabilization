@@ -1,0 +1,81 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: volume-stabilization-operator
+  labels:
+    app.kubernetes.io/name: volume-stabilization-operator
+    app.kubernetes.io/component: rbac
+rules:
+# CRD permissions
+- apiGroups: ["synology.csi.io"]
+  resources: ["volumestabilizations"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["synology.csi.io"]
+  resources: ["volumestabilizations/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["synology.csi.io"]
+  resources: ["volumestabilizations/finalizers"]
+  verbs: ["update"]
+# Core permissions
+- apiGroups: [""]
+  resources: ["persistentvolumes"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: volume-stabilization-operator
+  labels:
+    app.kubernetes.io/name: volume-stabilization-operator
+    app.kubernetes.io/component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: volume-stabilization-operator
+subjects:
+- kind: ServiceAccount
+  name: volume-stabilization-operator
+  namespace: volume-stabilization
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: volume-stabilization-operator-leader-election
+  namespace: volume-stabilization
+  labels:
+    app.kubernetes.io/name: volume-stabilization-operator
+    app.kubernetes.io/component: rbac
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: volume-stabilization-operator-leader-election
+  namespace: volume-stabilization
+  labels:
+    app.kubernetes.io/name: volume-stabilization-operator
+    app.kubernetes.io/component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: volume-stabilization-operator-leader-election
+subjects:
+- kind: ServiceAccount
+  name: volume-stabilization-operator
+  namespace: volume-stabilization

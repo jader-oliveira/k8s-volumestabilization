@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: volume-stabilization
+  labels:
+    app.kubernetes.io/name: volume-stabilization-operator
+    app.kubernetes.io/component: namespace
