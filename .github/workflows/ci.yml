@@ -16,7 +16,6 @@ env:
   IMAGE_NAME: jaderoliver/volume-stabilization-operator
 
 jobs:
-
   # ──────────────────────────────────────────────────────────────────
   # 1. Lint — code style + static analysis
   # ──────────────────────────────────────────────────────────────────
