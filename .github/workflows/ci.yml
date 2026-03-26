@@ -62,7 +62,7 @@ jobs:
         run: go test -race -count=1 -timeout 120s -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: operator/coverage.out
           fail_ci_if_error: false
@@ -92,6 +92,7 @@ jobs:
           go-version-input: ${{ env.GO_VERSION }}
           go-package: ./...
           work-dir: operator
+          repo-checkout: false   # we already checked out above; avoids git clean nuking go.sum
 
       - name: gosec (static security analysis)
         working-directory: operator
@@ -100,8 +101,8 @@ jobs:
           gosec -fmt sarif -out gosec-results.sarif ./... || true
 
       - name: Upload gosec results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && github.event_name != 'pull_request'
         with:
           sarif_file: operator/gosec-results.sarif
           category: gosec
@@ -175,7 +176,7 @@ jobs:
 
       - name: Upload Trivy results to GitHub Security
         if: always() && github.event_name != 'pull_request'
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
           category: trivy
