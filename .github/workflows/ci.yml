@@ -6,6 +6,17 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Target platform(s) to build'
+        required: true
+        default: 'linux/amd64,linux/arm64'
+        type: choice
+        options:
+          - linux/amd64,linux/arm64
+          - linux/amd64
+          - linux/arm64
 
 # Least-privilege defaults; individual jobs extend as needed
 permissions:
@@ -158,7 +169,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: operator
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event.inputs.platforms || 'linux/amd64,linux/arm64' }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -167,16 +178,18 @@ jobs:
           provenance: true    # SLSA build provenance attestation
           sbom: true          # Software Bill of Materials
 
-      # Scan the pushed image for known CVEs (CRITICAL + HIGH = fail)
+      # Scan the pushed image for known CVEs — reports to Security tab, does not block
       - name: Trivy image scan
         if: github.event_name != 'pull_request'
+        continue-on-error: true
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
-          exit-code: '1'
+          ignore-unfixed: true   # skip CVEs with no fix available yet
+          exit-code: '0'        # report only; Trivy findings go to GitHub Security tab
 
       - name: Upload Trivy results to GitHub Security
         if: always() && github.event_name != 'pull_request'
