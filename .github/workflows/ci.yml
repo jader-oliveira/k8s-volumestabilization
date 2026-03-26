@@ -170,7 +170,7 @@ jobs:
       # Scan the pushed image for known CVEs (CRITICAL + HIGH = fail)
       - name: Trivy image scan
         if: github.event_name != 'pull_request'
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
           format: sarif
