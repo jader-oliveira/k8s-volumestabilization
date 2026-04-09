@@ -5,7 +5,7 @@
 [![Go](https://img.shields.io/badge/Go-1.21-blue)](https://golang.org)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.27%2B-blue)](https://kubernetes.io)
 [![controller-runtime](https://img.shields.io/badge/controller--runtime-v0.17-blue)](https://github.com/kubernetes-sigs/controller-runtime)
-[![Image](https://img.shields.io/badge/image-jaderoliver%2Fvolume--stabilization--operator%3Av0.1.3-blue)](https://hub.docker.com/r/jaderoliver/volume-stabilization-operator)
+[![Image](https://img.shields.io/badge/image-jaderoliver%2Fvolume--stabilization--operator%3Av0.1.4-blue)](https://hub.docker.com/r/jaderoliver/volume-stabilization-operator)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green)](https://www.apache.org/licenses/LICENSE-2.0)
 
 ---

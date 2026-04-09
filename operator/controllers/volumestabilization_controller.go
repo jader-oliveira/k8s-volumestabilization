@@ -89,9 +89,19 @@ func (r *VolumeStabilizationReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Skip if failed (requires user intervention)
+	// Skip if permanently failed (requires user intervention — e.g. source already stabilized)
+	// Transient failures (source PVC not yet created) self-heal via requeue.
 	if vs.Status.Phase == synologyv1.VolumeStabilizationPhaseFailed {
-		return ctrl.Result{}, nil
+		if vs.Status.Message != "" && vs.Status.Conditions != nil {
+			for _, c := range vs.Status.Conditions {
+				if c.Reason == "AlreadyStabilized" {
+					return ctrl.Result{}, nil
+				}
+			}
+		}
+		// Transient failure — reset to Pending so we retry
+		vs.Status.Phase = synologyv1.VolumeStabilizationPhasePending
+		return r.updateStatus(ctx, vs)
 	}
 
 	// Reconcile based on phase
@@ -136,11 +146,15 @@ func (r *VolumeStabilizationReconciler) reconcilePending(ctx context.Context, vs
 
 	if err != nil {
 		if apierrors.IsNotFound(err) {
+			// Source PVC doesn't exist yet — could be applied out of order; retry.
 			vs.Status.Phase = synologyv1.VolumeStabilizationPhaseFailed
-			vs.Status.Message = fmt.Sprintf("Source PVC %s/%s not found", sourceNamespace, vs.Spec.SourcePVC.Name)
+			vs.Status.Message = fmt.Sprintf("Source PVC %s/%s not found — waiting for it to be created", sourceNamespace, vs.Spec.SourcePVC.Name)
 			r.setCondition(vs, "SourcePVCExists", corev1.ConditionFalse, "NotFound", vs.Status.Message)
 			r.Recorder.Eventf(vs, corev1.EventTypeWarning, "SourcePVCNotFound", "Source PVC %s/%s not found", sourceNamespace, vs.Spec.SourcePVC.Name)
-			return r.updateStatus(ctx, vs)
+			if _, err := r.updateStatus(ctx, vs); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 		return ctrl.Result{}, err
 	}
