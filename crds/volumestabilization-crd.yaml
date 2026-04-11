@@ -63,6 +63,10 @@ spec:
                   type: boolean
                   default: true
                   description: "Wait for original PVC/PV to be fully deleted before creating new ones"
+                deletionProtection:
+                  type: boolean
+                  default: false
+                  description: "When true, blocks deletion of this CR until set to false. Prevents accidental removal."
             status:
               type: object
               properties:

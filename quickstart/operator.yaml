@@ -61,6 +61,10 @@ spec:
                 waitForDeletion:
                   type: boolean
                   default: true
+                deletionProtection:
+                  type: boolean
+                  default: false
+                  description: "When true, blocks deletion of this CR until set to false. Prevents accidental removal."
             status:
               type: object
               properties:
@@ -277,7 +281,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: operator
-          image: jaderoliver/volume-stabilization-operator:v0.1.4
+        image: jaderoliver/volume-stabilization-operator:v0.1.4
         imagePullPolicy: Always
         securityContext:
           allowPrivilegeEscalation: false

@@ -87,6 +87,13 @@ type VolumeStabilizationSpec struct {
 	// +optional
 	// +kubebuilder:default=true
 	WaitForDeletion bool `json:"waitForDeletion,omitempty"`
+
+	// DeletionProtection prevents the VolumeStabilization from being deleted accidentally.
+	// When true, any kubectl delete on this CR will be blocked until this field is set to false.
+	// Protects against accidental deletion via kubectl delete -f on a manifests folder.
+	// +optional
+	// +kubebuilder:default=false
+	DeletionProtection bool `json:"deletionProtection,omitempty"`
 }
 
 // OriginalPVInfo stores information about the original PV

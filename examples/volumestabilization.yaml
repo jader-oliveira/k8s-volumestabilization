@@ -23,3 +23,9 @@ spec:
   
   # Wait for original PVC/PV to be fully deleted before creating new ones
   waitForDeletion: true
+
+  # Deletion protection: when true, kubectl delete on this CR will be blocked
+  # until you explicitly set this to false first.
+  # Safeguard against accidental kubectl delete -f on a manifests folder.
+  # To delete: kubectl patch vs stabilize-my-app-data --type=merge -p '{"spec":{"deletionProtection":false}}'
+  deletionProtection: true

@@ -76,7 +76,18 @@ func (r *VolumeStabilizationReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	// Handle deletion
 	if !vs.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, vs)
+		// If deletion protection is active, block removal but fall through to normal
+		// phase reconciliation so self-healing (e.g. reconcileBound re-creating a
+		// deleted stable PVC) continues to work while the VS is Terminating.
+		if vs.Spec.DeletionProtection {
+			log.Info("Deletion blocked by deletionProtection=true — continuing phase reconciliation",
+				"vs", vs.Name, "namespace", vs.Namespace)
+			r.Recorder.Eventf(vs, corev1.EventTypeWarning, "DeletionProtected",
+				"Deletion blocked: spec.deletionProtection=true. Set it to false to allow deletion.")
+			// Fall through — do NOT return here; let the phase switch below run.
+		} else {
+			return r.reconcileDelete(ctx, vs)
+		}
 	}
 
 	// Add finalizer if not present
