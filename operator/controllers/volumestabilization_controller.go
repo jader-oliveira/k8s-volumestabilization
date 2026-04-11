@@ -76,15 +76,33 @@ func (r *VolumeStabilizationReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	// Handle deletion
 	if !vs.DeletionTimestamp.IsZero() {
-		// If deletion protection is active, block removal but fall through to normal
-		// phase reconciliation so self-healing (e.g. reconcileBound re-creating a
-		// deleted stable PVC) continues to work while the VS is Terminating.
 		if vs.Spec.DeletionProtection {
-			log.Info("Deletion blocked by deletionProtection=true — continuing phase reconciliation",
+			// Check whether the DeletionBlocked condition is already recorded.
+			// If not, persist it now so it is always visible in kubectl describe
+			// (events are ephemeral and easily missed; a status condition is not).
+			alreadyBlocked := false
+			for _, c := range vs.Status.Conditions {
+				if c.Type == "DeletionBlocked" && c.Status == corev1.ConditionTrue {
+					alreadyBlocked = true
+					break
+				}
+			}
+			if !alreadyBlocked {
+				// First time we detect a blocked deletion — record it persistently.
+				r.setCondition(vs, "DeletionBlocked", corev1.ConditionTrue, "ProtectionEnabled",
+					"Deletion attempted but blocked by spec.deletionProtection=true. "+
+						"Set spec.deletionProtection=false to allow deletion.")
+				r.Recorder.Eventf(vs, corev1.EventTypeWarning, "DeletionProtected",
+					"Deletion blocked: spec.deletionProtection=true. Set it to false to allow deletion.")
+				// updateStatus triggers an immediate re-reconcile; the phase switch
+				// (and reconcileBound self-healing) will run on the very next loop.
+				return r.updateStatus(ctx, vs)
+			}
+			// Condition already recorded — fall through to normal phase reconciliation
+			// so reconcileBound keeps self-healing (e.g. re-creates a deleted PVC)
+			// while the VS is stuck in Terminating.
+			log.Info("Deletion blocked by deletionProtection=true; continuing phase reconciliation",
 				"vs", vs.Name, "namespace", vs.Namespace)
-			r.Recorder.Eventf(vs, corev1.EventTypeWarning, "DeletionProtected",
-				"Deletion blocked: spec.deletionProtection=true. Set it to false to allow deletion.")
-			// Fall through — do NOT return here; let the phase switch below run.
 		} else {
 			return r.reconcileDelete(ctx, vs)
 		}
