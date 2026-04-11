@@ -5,7 +5,7 @@
 [![Go](https://img.shields.io/badge/Go-1.21-blue)](https://golang.org)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.27%2B-blue)](https://kubernetes.io)
 [![controller-runtime](https://img.shields.io/badge/controller--runtime-v0.17-blue)](https://github.com/kubernetes-sigs/controller-runtime)
-[![Image](https://img.shields.io/badge/image-jaderoliver%2Fvolume--stabilization--operator%3Av0.1.4-blue)](https://hub.docker.com/r/jaderoliver/volume-stabilization-operator)
+[![Image](https://img.shields.io/badge/image-jaderoliver%2Fvolume--stabilization--operator%3Av0.1.6-blue)](https://hub.docker.com/r/jaderoliver/volume-stabilization-operator)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green)](https://www.apache.org/licenses/LICENSE-2.0)
 
 ---
@@ -20,6 +20,9 @@
 - [CRD Reference](#crd-reference)
 - [Quickstart](#quickstart)
 - [Day-2 Operations](#day-2-operations)
+  - [Deleting the stable PVC](#deleting-the-stable-pvc-accidental-or-intentional)
+  - [Deletion protection](#deletion-protection)
+  - [Removing everything cleanly](#removing-everything-cleanly)
 - [Compatibility](#compatibility)
 - [Project Structure](#project-structure)
 
@@ -207,6 +210,10 @@ PVs are cluster-scoped; a namespaced CR cannot own a cluster-scoped object — K
 
 The source PVC must be created and bound **before** the VS CR is applied, and the workload **after** stabilization completes. This is the necessary ordering — it cannot be parallelized. This maps cleanly to Helm pre-install hooks and GitOps wave ordering.
 
+### 5. Deletion protection via finalizer
+
+The operator always attaches a finalizer (`synology.csi.io/volumestabilization-finalizer`) to every VS CR. When `spec.deletionProtection: true` is set and `kubectl delete` is run, Kubernetes sets `DeletionTimestamp` but cannot garbage-collect the object while the finalizer exists. The controller detects this, records a persistent `DeletionBlocked` status condition, and continues normal phase reconciliation (including stable PVC self-healing) while the VS is in `Terminating` state. The finalizer is only removed — and the VS actually deleted — once `spec.deletionProtection: false` is set and `DeletionTimestamp` is still set.
+
 ### 5. PVC watch instead of Owns()
 
 `Owns()` sets OwnerReferences — prohibited here. Instead, `SetupWithManager` registers a `Watches()` on PVCs with a custom mapper function that reads the annotation to find the parent VS CR. This gives event-driven healing without cross-scope ownership.
@@ -236,6 +243,10 @@ spec:
   preserveAnnotations: true      # optional: copy annotations to new PVC (default: true)
   preserveLabels: true           # optional: copy labels to new PVC (default: true)
   waitForDeletion: true          # optional: wait for full PVC deletion (default: true)
+
+  deletionProtection: true       # optional: block accidental kubectl delete (default: false)
+                                 # While true, any delete on this CR is blocked until you
+                                 # explicitly patch it to false first.
 ```
 
 ### Status Fields
@@ -267,6 +278,8 @@ status:
     - type: DeleteOriginal
     - type: CreateNew
     - type: Stabilized          # True = fully operational and self-healing active
+    - type: DeletionBlocked     # True = kubectl delete was attempted but blocked by
+                                #        deletionProtection=true; clears on actual deletion
 ```
 
 ### Short names
@@ -387,6 +400,7 @@ kubectl apply -f my-app-deployment.yaml
 | Deployment deleted, PVC deleted | Recreates PVC; re-apply workload normally | ✅ |
 | Deployment deleted, PVC survives | No action needed; re-apply workload | ✅ |
 | VS CR deleted | PVC and PV are **retained**; operator stops managing | ✅ |
+| VS CR `kubectl delete` with `deletionProtection: true` | Blocked — VS stays `Terminating`; self-healing still active; `DeletionBlocked` condition recorded | ✅ |
 | Source PVC re-created after stabilization | Ignored (already `phase=Bound`) | ✅ |
 | Node where pod runs goes offline | Standard Kubernetes pod rescheduling; PVC already exists | ✅ |
 
@@ -405,11 +419,36 @@ kubectl logs -n volume-stabilization \
   deployment/volume-stabilization-operator --follow
 ```
 
+### Deletion protection
+
+Enable `spec.deletionProtection: true` to prevent accidental deletion of the VS CR (e.g. when running `kubectl delete -f` on a folder that includes your VS manifest).
+
+While protection is active:
+- Any `kubectl delete vs` is **blocked** — the CR remains `Terminating` but is not removed
+- A persistent `DeletionBlocked` condition is written to status (visible in `kubectl describe`)
+- A `DeletionProtected` warning event is emitted once
+- Self-healing (stable PVC recreation) **continues to work** normally
+
+```bash
+# Check whether deletion is blocked
+kubectl describe vs stabilize-my-app-data -n default
+# Look for: Conditions: DeletionBlocked=True
+
+# Lift protection and allow deletion
+kubectl patch vs stabilize-my-app-data -n default \
+  --type=merge -p '{"spec":{"deletionProtection":false}}'
+# The VS is now deleted automatically (DeletionTimestamp was already set)
+```
+
 ### Removing everything cleanly
 
 ```bash
 # Delete workload first
 kubectl delete deployment my-app -n default
+
+# If deletionProtection=true, lift it first
+kubectl patch vs stabilize-my-app-data -n default \
+  --type=merge -p '{"spec":{"deletionProtection":false}}'
 
 # Delete VS CR — PVC and PV are retained (data safe)
 kubectl delete vs stabilize-my-app-data -n default
