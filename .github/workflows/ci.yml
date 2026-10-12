@@ -198,7 +198,10 @@ jobs:
         if: always()   # run even if govulncheck found CVEs
         working-directory: operator
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          # Pinned: gosec@latest now requires Go >= 1.25 but this workflow builds with Go 1.21
+          # (GOTOOLCHAIN=local), so "@latest" fails at install time and skips the Build job.
+          # v2.20.0 is the last release that installs on Go 1.21. Drop the pin when GO_VERSION >= 1.25.
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.20.0
           gosec -fmt sarif -out gosec-results.sarif ./... || true
           gosec -fmt html  -out gosec-report.html  ./... || true
 
