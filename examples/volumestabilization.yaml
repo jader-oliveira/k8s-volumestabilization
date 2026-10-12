@@ -15,7 +15,14 @@ spec:
   target:
     pvcName: my-app-data       # Your desired predictable PVC name
     namespace: default         # Optional, defaults to source namespace
+    # storageClassName: nfs-synology  # Optional: override the stable PVC storage class.
+    # Leave unset to preserve the original storage class so normal PVC expansion keeps working.
+    # Set to "" only if you explicitly want static non-resizable binding.
     # pvName: my-custom-pv     # Optional: custom PV name (auto-generated if not specified)
+
+    # Desired capacity (v0.1.9+). Change this number and `kubectl apply` to GROW the volume.
+    # Grow-only, unit required ("30Gi", not "30"). Watch it with: kubectl get vs
+    # size: 30Gi
   
   # Preserve original PVC metadata
   preserveAnnotations: true

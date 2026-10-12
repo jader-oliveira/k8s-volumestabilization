@@ -18,6 +18,7 @@ package v1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -60,9 +61,20 @@ type TargetVolumeSpec struct {
 	// PVName is an optional specific name for the PV (auto-generated if not specified)
 	// +optional
 	PVName string `json:"pvName,omitempty"`
-	// StorageClassName for the new PVC (defaults to empty for static binding)
+	// StorageClassName for the stabilized PVC.
+	// Defaults to the original PV's StorageClass to preserve normal expansion
+	// behavior. Set this explicitly to "" to force static non-resizable binding.
 	// +optional
 	StorageClassName *string `json:"storageClassName,omitempty"`
+	// Size is the desired capacity of the stabilized volume. When set, the
+	// operator grows the stable PVC to this size (e.g. "30Gi"). Volumes can only
+	// grow: a value smaller than the current size is rejected and reported in the
+	// ResizeRejected condition. Leave unset to not manage the size.
+	// A unit is required ("30Gi", not "30").
+	// +optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$`
+	Size *resource.Quantity `json:"size,omitempty"`
 }
 
 // VolumeStabilizationSpec defines the desired state of VolumeStabilization
@@ -181,6 +193,12 @@ type VolumeStabilizationStatus struct {
 	// ObservedGeneration is the generation observed by the controller
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// CurrentSize is the capacity the stable PVC actually has right now
+	// (PVC status.capacity, or the requested size while it is still unknown).
+	// Compare with spec.target.size to see whether a resize has finished.
+	// +optional
+	CurrentSize string `json:"currentSize,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -189,6 +207,8 @@ type VolumeStabilizationStatus struct {
 // +kubebuilder:printcolumn:name="Source PVC",type=string,JSONPath=`.spec.sourcePVC.name`,description="Original PVC name"
 // +kubebuilder:printcolumn:name="Target PVC",type=string,JSONPath=`.spec.target.pvcName`,description="New PVC name"
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`,description="Current phase"
+// +kubebuilder:printcolumn:name="Size",type=string,JSONPath=`.spec.target.size`,description="Desired size"
+// +kubebuilder:printcolumn:name="Current",type=string,JSONPath=`.status.currentSize`,description="Actual size"
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // VolumeStabilization is the Schema for the volumestabilizations API

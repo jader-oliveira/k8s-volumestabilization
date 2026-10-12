@@ -1,5 +1,5 @@
 # Image URL to use all building/pushing image targets
-IMG ?= ghcr.io/yourusername/volume-stabilization-operator:v0.1.0
+IMG ?= jaderoliver/volume-stabilization-operator:v0.1.9
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))

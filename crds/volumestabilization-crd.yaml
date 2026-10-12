@@ -50,7 +50,11 @@ spec:
                       description: "Optional: specific name for the PV (auto-generated if not specified)"
                     storageClassName:
                       type: string
-                      description: "Storage class for the new PVC (defaults to empty for static binding)"
+                      description: "Storage class for the new PVC (defaults to the original PV's class so the volume stays expandable; set \"\" for static, non-resizable binding)"
+                    size:
+                      type: string
+                      pattern: '^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$'
+                      description: "Desired capacity of the stable PVC, e.g. 30Gi (a unit is required). The operator grows the PVC to this size; volumes can only grow. Leave unset to not manage the size."
                 preserveAnnotations:
                   type: boolean
                   default: true
@@ -136,6 +140,9 @@ spec:
                 observedGeneration:
                   type: integer
                   description: "The generation observed by the controller"
+                currentSize:
+                  type: string
+                  description: "Actual capacity of the stable PVC right now (PVC status.capacity). Compare with spec.target.size to see whether a resize has finished."
       additionalPrinterColumns:
         - name: Source PVC
           type: string
@@ -149,6 +156,14 @@ spec:
           type: string
           jsonPath: .status.phase
           description: Current phase
+        - name: Size
+          type: string
+          jsonPath: .spec.target.size
+          description: Desired size
+        - name: Current
+          type: string
+          jsonPath: .status.currentSize
+          description: Actual size
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp

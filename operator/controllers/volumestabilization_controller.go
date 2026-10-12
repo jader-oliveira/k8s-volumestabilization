@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -43,6 +44,13 @@ const (
 	stabilizedLabel              = "synology.csi.io/stabilized"
 	originalPVCNameAnnotation    = "synology.csi.io/original-pvc-name"
 	originalPVNameAnnotation     = "synology.csi.io/original-pv-name"
+
+	// Resize-related status conditions.
+	conditionResized        = "Resized"        // True once PVC capacity >= spec.target.size
+	conditionResizeRejected = "ResizeRejected" // True while spec.target.size cannot be honoured
+
+	// How often to re-check a resize that the CSI driver has not finished yet.
+	resizePollInterval = 15 * time.Second
 )
 
 // VolumeStabilizationReconciler reconciles a VolumeStabilization object
@@ -360,6 +368,7 @@ func (r *VolumeStabilizationReconciler) reconcileCapturing(ctx context.Context, 
 func (r *VolumeStabilizationReconciler) reconcileDeletingOriginal(ctx context.Context, vs *synologyv1.VolumeStabilization) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 	log.Info("Reconciling DeletingOriginal phase")
+	targetStorageClassName := resolveTargetStorageClassName(vs)
 
 	// Determine source namespace
 	sourceNamespace := vs.Spec.SourcePVC.Namespace
@@ -411,12 +420,13 @@ func (r *VolumeStabilizationReconciler) reconcileDeletingOriginal(ctx context.Co
 
 			case corev1.VolumeReleased, corev1.VolumeAvailable:
 				if pv.Spec.ClaimRef != nil {
-					// Clear claimRef and storageClassName so the PV becomes Available
-					// and can be statically bound by a new PVC.
+					// Clear claimRef so the PV becomes Available again. Keep the
+					// original/requested storage class when possible so the rebound
+					// PVC remains expansion-compatible.
 					log.Info("Clearing claimRef on original PV to make it Available", "pv", pv.Name)
 					patch := client.MergeFrom(pv.DeepCopy())
 					pv.Spec.ClaimRef = nil
-					pv.Spec.StorageClassName = ""
+					pv.Spec.StorageClassName = *targetStorageClassName
 					if err := r.Patch(ctx, pv, patch); err != nil {
 						return ctrl.Result{}, err
 					}
@@ -440,6 +450,7 @@ func (r *VolumeStabilizationReconciler) reconcileDeletingOriginal(ctx context.Co
 func (r *VolumeStabilizationReconciler) reconcileCreating(ctx context.Context, vs *synologyv1.VolumeStabilization) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 	log.Info("Reconciling Creating phase")
+	targetStorageClassName := resolveTargetStorageClassName(vs)
 
 	if vs.Status.OriginalPV == nil {
 		vs.Status.Phase = synologyv1.VolumeStabilizationPhaseFailed
@@ -499,8 +510,8 @@ func (r *VolumeStabilizationReconciler) reconcileCreating(ctx context.Context, v
 
 	// Build labels/annotations — source PVC is already deleted so we use captured info
 	labels := map[string]string{
-		stabilizedLabel:                    "true",
-		"synology.csi.io/managed-by":       "volume-stabilization-operator",
+		stabilizedLabel:              "true",
+		"synology.csi.io/managed-by": "volume-stabilization-operator",
 	}
 	annotations := map[string]string{
 		originalPVCNameAnnotation:          vs.Spec.SourcePVC.Name,
@@ -524,9 +535,6 @@ func (r *VolumeStabilizationReconciler) reconcileCreating(ctx context.Context, v
 		}
 	}
 
-	// storageClassName must be "" (empty string pointer) for static pre-binding.
-	// This matches the "" we set on the PV during claimRef clearing.
-	empty := ""
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        vs.Spec.Target.PVCName,
@@ -538,11 +546,11 @@ func (r *VolumeStabilizationReconciler) reconcileCreating(ctx context.Context, v
 			AccessModes: accessModes,
 			Resources: corev1.VolumeResourceRequirements{
 				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: resource.MustParse(vs.Status.OriginalPV.Storage),
+					corev1.ResourceStorage: sizeForNewPVC(vs, pv),
 				},
 			},
-			VolumeName:       originalPVName, // Pre-bind to the existing PV
-			StorageClassName: &empty,         // Empty = static binding
+			VolumeName:       originalPVName,
+			StorageClassName: targetStorageClassName,
 		},
 	}
 
@@ -584,8 +592,8 @@ func (r *VolumeStabilizationReconciler) reconcileBound(ctx context.Context, vs *
 	pvc := &corev1.PersistentVolumeClaim{}
 	err := r.Get(ctx, types.NamespacedName{Name: vs.Status.NewPVC.Name, Namespace: vs.Status.NewPVC.Namespace}, pvc)
 	if err == nil {
-		// PVC is healthy — nothing to do.
-		return ctrl.Result{}, nil
+		// PVC is healthy — reconcile its size against spec.target.size.
+		return r.reconcileResize(ctx, vs, pvc)
 	}
 	if !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, err
@@ -605,10 +613,11 @@ func (r *VolumeStabilizationReconciler) reconcileBound(ctx context.Context, vs *
 		pv := &corev1.PersistentVolume{}
 		if pvErr := r.Get(ctx, types.NamespacedName{Name: vs.Status.OriginalPV.Name}, pv); pvErr == nil {
 			if pv.Spec.ClaimRef != nil {
+				targetStorageClassName := resolveTargetStorageClassName(vs)
 				log.Info("Clearing stale claimRef on original PV", "pv", pv.Name)
 				patch := client.MergeFrom(pv.DeepCopy())
 				pv.Spec.ClaimRef = nil
-				pv.Spec.StorageClassName = ""
+				pv.Spec.StorageClassName = *targetStorageClassName
 				if patchErr := r.Patch(ctx, pv, patch); patchErr != nil {
 					return ctrl.Result{}, patchErr
 				}
@@ -686,6 +695,211 @@ func (r *VolumeStabilizationReconciler) updateStatus(ctx context.Context, vs *sy
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+func resolveTargetStorageClassName(vs *synologyv1.VolumeStabilization) *string {
+	if vs.Spec.Target.StorageClassName != nil {
+		return vs.Spec.Target.StorageClassName
+	}
+	if vs.Status.OriginalPV != nil && vs.Status.OriginalPV.StorageClassName != "" {
+		storageClassName := vs.Status.OriginalPV.StorageClassName
+		return &storageClassName
+	}
+	empty := ""
+	return &empty
+}
+
+// sizeForNewPVC returns the capacity a (re)created stable PVC must request.
+//
+// It is the live capacity of the PV and deliberately NOT spec.target.size:
+//   - a PVC that requests more than its PV offers can never bind, and a volume
+//     can only be expanded once its PVC is bound; so growth is always a second
+//     step (reconcileResize) after the claim is Bound;
+//   - the capacity captured when the volume was first stabilized goes stale after
+//     an expansion, so it is only a fallback for PVs that report no capacity.
+func sizeForNewPVC(vs *synologyv1.VolumeStabilization, pv *corev1.PersistentVolume) resource.Quantity {
+	size := pv.Spec.Capacity[corev1.ResourceStorage]
+	if size.IsZero() && vs.Status.OriginalPV != nil && vs.Status.OriginalPV.Storage != "" {
+		if q, err := resource.ParseQuantity(vs.Status.OriginalPV.Storage); err == nil {
+			size = q
+		}
+	}
+	if size.IsZero() {
+		size = resource.MustParse("1Gi")
+	}
+	return size
+}
+
+// reconcileResize drives the stable PVC to spec.target.size.
+//
+//   - size unset            → not managed; only status.currentSize is kept fresh
+//   - size  > requested     → patch PVC requests.storage (CSI resizer does the rest)
+//   - size == requested     → nothing to patch; report Resized once capacity catches up
+//   - size  < requested     → rejected (volumes cannot shrink), PVC untouched
+//
+// It is idempotent and only writes VS status when something actually changed,
+// because every status write re-triggers a reconcile.
+func (r *VolumeStabilizationReconciler) reconcileResize(ctx context.Context, vs *synologyv1.VolumeStabilization, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+
+	// Only a Bound claim can be expanded (the API server answers 422 otherwise).
+	// The PVC watch re-triggers us the moment it binds; the requeue is a safety net.
+	if vs.Spec.Target.Size != nil && pvc.Status.Phase != corev1.ClaimBound {
+		log.Info("Stable PVC is not Bound yet; deferring resize", "pvc", pvc.Name, "phase", pvc.Status.Phase)
+		return ctrl.Result{RequeueAfter: resizePollInterval}, nil
+	}
+
+	requested := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	actual := requested
+	capacity, hasCapacity := pvc.Status.Capacity[corev1.ResourceStorage]
+	if hasCapacity {
+		actual = capacity
+	}
+
+	changed := false
+	if cur := actual.String(); vs.Status.CurrentSize != cur {
+		vs.Status.CurrentSize = cur
+		changed = true
+	}
+
+	var requeueAfter time.Duration
+	desired := vs.Spec.Target.Size
+
+	switch {
+	case desired == nil:
+		// Size is not managed by this CR; drop any stale resize conditions.
+		changed = removeCondition(vs, conditionResized) || changed
+		changed = removeCondition(vs, conditionResizeRejected) || changed
+
+	case desired.Sign() <= 0:
+		changed = r.rejectResize(vs, "InvalidSize",
+			"spec.target.size must be greater than zero") || changed
+
+	case desired.Cmp(requested) < 0:
+		changed = r.rejectResize(vs, "ShrinkNotSupported", fmt.Sprintf(
+			"spec.target.size %s is smaller than the current size %s; volumes can only grow",
+			desired.String(), requested.String())) || changed
+
+	case desired.Cmp(requested) > 0:
+		from := requested.String()
+		patch := client.MergeFrom(pvc.DeepCopy())
+		if pvc.Spec.Resources.Requests == nil {
+			pvc.Spec.Resources.Requests = corev1.ResourceList{}
+		}
+		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = desired.DeepCopy()
+		if err := r.Patch(ctx, pvc, patch); err != nil {
+			switch {
+			case apierrors.IsConflict(err):
+				return ctrl.Result{Requeue: true}, nil
+			case apierrors.IsForbidden(err), apierrors.IsInvalid(err):
+				// e.g. StorageClass does not allow volume expansion. Not retryable
+				// until the user changes something, so report it and stop.
+				log.Info("PVC expansion rejected by the API server", "pvc", pvc.Name, "error", err.Error())
+				changed = r.rejectResize(vs, "ExpansionRejected", conciseAPIError(err)) || changed
+			default:
+				return ctrl.Result{}, err
+			}
+		} else {
+			log.Info("Expanding stable PVC", "pvc", pvc.Name, "namespace", pvc.Namespace,
+				"from", from, "to", desired.String())
+			r.Recorder.Eventf(vs, corev1.EventTypeNormal, "Resizing",
+				"Expanding PVC %s/%s from %s to %s", pvc.Namespace, pvc.Name, from, desired.String())
+			changed = removeCondition(vs, conditionResizeRejected) || changed
+			changed = upsertCondition(vs, conditionResized, corev1.ConditionFalse, "Resizing",
+				fmt.Sprintf("Expanding from %s to %s", from, desired.String())) || changed
+			requeueAfter = resizePollInterval
+		}
+
+	default: // desired == requested
+		changed = removeCondition(vs, conditionResizeRejected) || changed
+		if hasCapacity && capacity.Cmp(*desired) >= 0 {
+			changed = upsertCondition(vs, conditionResized, corev1.ConditionTrue, "Resized",
+				fmt.Sprintf("Volume capacity is %s", capacity.String())) || changed
+		} else {
+			changed = upsertCondition(vs, conditionResized, corev1.ConditionFalse, "Resizing",
+				fmt.Sprintf("Waiting for the CSI driver to expand the volume to %s", desired.String())) || changed
+			requeueAfter = resizePollInterval
+		}
+	}
+
+	if !changed {
+		if requeueAfter > 0 {
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
+		}
+		return ctrl.Result{}, nil
+	}
+	res, err := r.updateStatus(ctx, vs)
+	if err != nil || res.Requeue {
+		return res, err
+	}
+	if requeueAfter > 0 {
+		res.RequeueAfter = requeueAfter
+	}
+	return res, nil
+}
+
+// conciseAPIError reduces an API error to its first line, capped in length.
+// Validation errors can embed a multi-line object diff; putting that in a status
+// condition would be unreadable and — worse — unstable between reconciles.
+func conciseAPIError(err error) string {
+	msg := err.Error()
+	if i := strings.IndexByte(msg, '\n'); i >= 0 {
+		msg = msg[:i]
+	}
+	const max = 240
+	if len(msg) > max {
+		msg = msg[:max] + "…"
+	}
+	return msg
+}
+
+// rejectResize records the ResizeRejected condition and, only when that is new
+// information, emits a Warning event. It reports whether status changed.
+func (r *VolumeStabilizationReconciler) rejectResize(vs *synologyv1.VolumeStabilization, reason, message string) bool {
+	changed := upsertCondition(vs, conditionResizeRejected, corev1.ConditionTrue, reason, message)
+	if changed {
+		r.Recorder.Event(vs, corev1.EventTypeWarning, reason, message)
+	}
+	// A rejected request means the volume is not being resized.
+	removeCondition(vs, conditionResized)
+	return changed
+}
+
+// upsertCondition sets a condition and reports whether anything changed.
+// Unlike setCondition it never re-stamps an unchanged condition, so callers can
+// use the return value to avoid pointless status writes (and reconcile loops).
+// LastTransitionTime only moves when the status value itself flips.
+func upsertCondition(vs *synologyv1.VolumeStabilization, condType string, status corev1.ConditionStatus, reason, message string) bool {
+	now := metav1.Now()
+	for i := range vs.Status.Conditions {
+		c := &vs.Status.Conditions[i]
+		if c.Type != condType {
+			continue
+		}
+		if c.Status == status && c.Reason == reason && c.Message == message {
+			return false
+		}
+		if c.Status != status {
+			c.LastTransitionTime = &now
+		}
+		c.Status, c.Reason, c.Message = status, reason, message
+		return true
+	}
+	vs.Status.Conditions = append(vs.Status.Conditions, synologyv1.VolumeStabilizationCondition{
+		Type: condType, Status: status, Reason: reason, Message: message, LastTransitionTime: &now,
+	})
+	return true
+}
+
+// removeCondition deletes a condition and reports whether it existed.
+func removeCondition(vs *synologyv1.VolumeStabilization, condType string) bool {
+	for i := range vs.Status.Conditions {
+		if vs.Status.Conditions[i].Type == condType {
+			vs.Status.Conditions = append(vs.Status.Conditions[:i], vs.Status.Conditions[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // SetupWithManager sets up the controller with the Manager.

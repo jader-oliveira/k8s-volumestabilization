@@ -50,8 +50,13 @@ spec:
                       type: string
                     namespace:
                       type: string
+                    pvName:
+                      type: string
                     storageClassName:
                       type: string
+                    size:
+                      type: string
+                      pattern: '^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$'
                 preserveAnnotations:
                   type: boolean
                   default: true
@@ -71,6 +76,7 @@ spec:
                 phase:
                   type: string
                   enum: ["Pending", "Discovering", "Capturing", "DeletingOriginal", "Creating", "Bound", "Failed"]
+                  default: "Pending"
                 originalPV:
                   type: object
                   properties:
@@ -127,6 +133,8 @@ spec:
                         type: string
                 observedGeneration:
                   type: integer
+                currentSize:
+                  type: string
       additionalPrinterColumns:
         - name: Source PVC
           type: string
@@ -137,6 +145,12 @@ spec:
         - name: Phase
           type: string
           jsonPath: .status.phase
+        - name: Size
+          type: string
+          jsonPath: .spec.target.size
+        - name: Current
+          type: string
+          jsonPath: .status.currentSize
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -281,7 +295,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: operator
-        image: jaderoliver/volume-stabilization-operator:v0.1.4
+        image: jaderoliver/volume-stabilization-operator:v0.1.9
         imagePullPolicy: Always
         securityContext:
           allowPrivilegeEscalation: false

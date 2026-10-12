@@ -10,8 +10,8 @@ resources:
   - deployment.yaml
 
 images:
-  - name: ghcr.io/yourusername/volume-stabilization-operator
-    newTag: v0.1.0
+  - name: jaderoliver/volume-stabilization-operator
+    newTag: v0.1.9
 
 labels:
   - pairs:
