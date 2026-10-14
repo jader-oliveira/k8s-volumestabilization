@@ -1,45 +1,95 @@
-# TWO-PHASE DEPLOYMENT APPROACH
-# ==============================
-# The timing problem: if you apply the PVC, VolumeStabilization, AND Deployment
-# all at once, the Deployment mounts the dynamic PVC which the operator then
-# deletes — breaking your workload.
+# =============================================================================
+# Workload with a stabilized PVC — TWO-PHASE example
+# =============================================================================
+# This file holds TWO objects, each labelled with the step it belongs to:
 #
-# The solution is two phases:
-#   Phase 1 (this file): storage only — create the PVC, stabilize it.
-#   Phase 2 (workload.yaml): deploy the workload using the STABLE PVC name.
+#   step=seed      the dynamic "seed" PVC   (create ONCE, then it is consumed)
+#   step=workload  the Deployment           (safe to re-apply any time)
 #
-# --- PHASE 1: Apply this file first ---
+# WHY TWO PHASES
+#   The stabilization operator deletes the seed PVC and recreates the volume
+#   under a stable name. A workload must therefore mount the STABLE name
+#   (my-app-data), never the seed (my-app-data-dynamic). The Deployment below
+#   already does that, so if it starts first it simply waits (Pending) until the
+#   stable PVC exists — nothing breaks.
 #
-#   kubectl apply -f examples/workload-with-pvc.yaml
-#   kubectl wait --for=jsonpath='{.status.phase}'=Bound \
-#     pvc/my-app-data-dynamic -n default --timeout=120s
-#   kubectl apply -f examples/volumestabilization.yaml
-#   kubectl wait --for=jsonpath='{.status.phase}'=Bound \
-#     volumestabilization/stabilize-my-app-data -n default --timeout=120s
+# FIRST TIME  (as tested end to end)
+#   1. Create the seed PVC and the Deployment:
+#        kubectl apply -f examples/workload-with-pvc.yaml
+#   2. Wait for the seed PVC to be provisioned and Bound:
+#        kubectl wait --for=jsonpath='{.status.phase}'=Bound \
+#          pvc/my-app-data-dynamic -n default --timeout=120s
+#   3. Stabilize it (renames it to my-app-data on the SAME PV):
+#        kubectl apply -f examples/volumestabilization.yaml
+#   4. Wait for the stabilization to finish:
+#        kubectl wait --for=jsonpath='{.status.phase}'=Bound \
+#          volumestabilization/stabilize-my-app-data -n default --timeout=120s
+#   5. The pod starts by itself once my-app-data is Bound:
+#        kubectl get pvc,pod -n default
 #
-# Then proceed to Phase 2 (workload.yaml).
+# AFTER THAT — RE-APPLYING THE WORKLOAD  (updates, GitOps sync, redeploy)
+#   Apply ONLY the Deployment, never the whole file:
+#
+#        kubectl apply -f examples/workload-with-pvc.yaml -l step=workload
+#
+# !! NEVER apply the seed PVC again once stabilization is Bound !!
+#    `kubectl apply -f examples/workload-with-pvc.yaml` (without -l) re-creates
+#    my-app-data-dynamic. The operator ignores it, but the CSI driver still
+#    provisions a NEW, unused volume and NAS folder for it (an orphan you must
+#    delete by hand). If you use GitOps/Argo/Flux, keep the seed PVC out of the
+#    synced path (or split it into its own file) after the first run.
+#
+# DISASTER / CLEAN RECREATE (data is kept)
+#   kubectl delete deployment my-app -n default
+#   kubectl delete pvc my-app-data -n default     # the operator heals it in seconds,
+#                                                 # on the same PV, at the CURRENT size
+#   kubectl apply -f examples/workload-with-pvc.yaml -l step=workload
+#
+# RESIZING THE VOLUME
+#   Do it on the VolumeStabilization (examples/volumestabilization.yaml:
+#   target.size), NOT here. Editing the seed PVC size does nothing useful — it
+#   only affects the first creation and re-applying it creates an orphan.
+#
+# REMOVING EVERYTHING
+#   kubectl delete deployment my-app -n default
+#   kubectl patch vs stabilize-my-app-data -n default --type=merge \
+#     -p '{"spec":{"deletionProtection":false}}'
+#   kubectl delete vs stabilize-my-app-data -n default     # PVC + PV are kept
+#   kubectl delete pvc my-app-data -n default              # only if you want the data gone
+#   kubectl delete pv <pv-name>                            # CSI then removes the NFS export
+# =============================================================================
 
+# -----------------------------------------------------------------------------
+# PHASE 1 — SEED PVC  (apply once; consumed by the VolumeStabilization)
+# -----------------------------------------------------------------------------
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: my-app-data-dynamic
+  name: my-app-data-dynamic          # the SEED name referenced by sourcePVC
   namespace: default
+  labels:
+    step: seed
 spec:
   accessModes:
     - ReadWriteMany
   resources:
     requests:
+      # Initial size ONLY. To change the size later, use target.size on the
+      # VolumeStabilization — not this value.
       storage: 1Gi
-  storageClassName: nfs-synology  # Your Synology CSI storage class
+  storageClassName: nfs-synology     # Your Synology CSI storage class
 ---
-# --- PHASE 2: Apply AFTER stabilization reaches phase=Bound ---
-# The Deployment (and any other workload) must reference the STABLE name,
-# never the dynamic one. Only deploy this after Phase 1 is complete.
+# -----------------------------------------------------------------------------
+# PHASE 2 — WORKLOAD  (safe to re-apply: `kubectl apply -f ... -l step=workload`)
+# -----------------------------------------------------------------------------
+# Must reference the STABLE PVC name, never the seed.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: my-app
   namespace: default
+  labels:
+    step: workload
 spec:
   replicas: 1
   selector:
@@ -59,4 +109,4 @@ spec:
       volumes:
       - name: data
         persistentVolumeClaim:
-          claimName: my-app-data  # ← STABLE name, not the dynamic one
+          claimName: my-app-data     # ← STABLE name, not my-app-data-dynamic

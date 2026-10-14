@@ -1,38 +1,100 @@
-# Example VolumeStabilization CR
-# This stabilizes the dynamically created PVC to a predictable name
+# =============================================================================
+# VolumeStabilization — example CR
+# =============================================================================
+# WHAT IT DOES
+#   Gives a dynamically provisioned PVC (UUID-named PV on the NAS) a stable,
+#   predictable name WITHOUT recreating the volume or touching the data:
+#
+#       my-app-data-dynamic  (seed, CSI-provisioned)  ──►  my-app-data  (stable)
+#
+#   The original PV (and the NFS folder on the NAS) is reused, never deleted.
+#   If the stable PVC is ever deleted, the operator recreates it on the same PV.
+#
+# ORDER OF OPERATIONS  (this is the only thing that can go wrong — follow it)
+#   1. Operator + CRD installed       kubectl get crd volumestabilizations.synology.csi.io
+#   2. Seed PVC created and Bound     (see examples/workload-with-pvc.yaml)
+#   3. Apply THIS file                kubectl apply -f examples/volumestabilization.yaml
+#   4. Wait for Bound                 kubectl wait --for=jsonpath='{.status.phase}'=Bound \
+#                                       volumestabilization/stabilize-my-app-data -n default --timeout=120s
+#   5. Deploy the workload on the STABLE name (my-app-data), never the seed.
+#
+# COMMON TASKS
+#   Check state ........ kubectl get vs -n default            (PHASE / SIZE / CURRENT)
+#   Details ............ kubectl describe vs stabilize-my-app-data -n default
+#   Resize ............. uncomment `size:` below, set a LARGER value, kubectl apply
+#                        (grow-only; watch CURRENT reach SIZE; needs v0.1.9+ operator)
+#   Remove this CR ..... see "REMOVING" at the bottom (PVC and PV are kept)
+#
+# !! NEVER re-apply the SEED PVC after this CR is Bound !!
+#    The operator ignores it, but the CSI driver still provisions a brand-new,
+#    unused volume (and NAS folder) for it. That is how orphan volumes appear.
+# =============================================================================
 apiVersion: synology.csi.io/v1
 kind: VolumeStabilization
 metadata:
   name: stabilize-my-app-data
   namespace: default
 spec:
-  # Reference to the dynamically created PVC
+  # ---------------------------------------------------------------------------
+  # SOURCE: the dynamically created PVC to take over. It must exist and be Bound
+  # before this CR is applied (if it does not exist yet the CR retries by itself).
+  # ---------------------------------------------------------------------------
   sourcePVC:
-    name: my-app-data-dynamic  # The PVC created by CSI driver
-    namespace: default         # Optional, defaults to CR namespace
-  
-  # Target configuration for the stabilized volume
-  target:
-    pvcName: my-app-data       # Your desired predictable PVC name
-    namespace: default         # Optional, defaults to source namespace
-    # storageClassName: nfs-synology  # Optional: override the stable PVC storage class.
-    # Leave unset to preserve the original storage class so normal PVC expansion keeps working.
-    # Set to "" only if you explicitly want static non-resizable binding.
-    # pvName: my-custom-pv     # Optional: custom PV name (auto-generated if not specified)
+    name: my-app-data-dynamic  # The PVC created by the CSI driver
+    namespace: default         # Optional, defaults to the CR's namespace
 
-    # Desired capacity (v0.1.9+). Change this number and `kubectl apply` to GROW the volume.
-    # Grow-only, unit required ("30Gi", not "30"). Watch it with: kubectl get vs
+  # ---------------------------------------------------------------------------
+  # TARGET: the stable PVC the operator creates, bound to the SAME PV.
+  # ---------------------------------------------------------------------------
+  target:
+    pvcName: my-app-data       # The stable, predictable name your workload uses
+    namespace: default         # Optional, defaults to the source namespace
+
+    # --- RESIZE (v0.1.9+) ----------------------------------------------------
+    # To grow the volume: uncomment, set a value LARGER than the current size,
+    # then `kubectl apply`. Check progress with `kubectl get vs` (SIZE vs CURRENT).
+    #   - A unit is required: "30Gi" is valid, "30" (bytes) is rejected by the API.
+    #   - Grow-only. A smaller value is refused (ResizeRejected=ShrinkNotSupported).
+    #   - The StorageClass must have allowVolumeExpansion: true.
+    #   - If the application also tracks a size (e.g. Zalando postgres
+    #     `volume.size`), set the same value there.
+    #   - Leave commented to leave the size unmanaged.
     # size: 30Gi
-  
-  # Preserve original PVC metadata
+
+    # --- STORAGE CLASS (leave alone unless you know you need it) -------------
+    # Unset (default): the original StorageClass is kept, so the volume stays
+    # resizable. Setting it to "" forces static, NON-resizable binding.
+    # storageClassName: nfs-synology
+
+    # Optional custom PV name (auto-generated if not specified)
+    # pvName: my-custom-pv
+
+  # ---------------------------------------------------------------------------
+  # BEHAVIOUR (these are the defaults; shown for clarity)
+  # ---------------------------------------------------------------------------
+  # Copy labels/annotations from the original PVC onto the stable one
   preserveAnnotations: true
   preserveLabels: true
-  
-  # Wait for original PVC/PV to be fully deleted before creating new ones
+
+  # Wait until the original PVC is fully gone before creating the stable one
   waitForDeletion: true
 
-  # Deletion protection: when true, kubectl delete on this CR will be blocked
-  # until you explicitly set this to false first.
-  # Safeguard against accidental kubectl delete -f on a manifests folder.
-  # To delete: kubectl patch vs stabilize-my-app-data --type=merge -p '{"spec":{"deletionProtection":false}}'
+  # ---------------------------------------------------------------------------
+  # SAFETY: when true, `kubectl delete` on this CR is BLOCKED (it stays
+  # Terminating, condition DeletionBlocked=True) until you set it to false.
+  # Protects against an accidental `kubectl delete -f <folder>`.
+  # Self-healing of the stable PVC keeps working while protection is on.
+  # ---------------------------------------------------------------------------
   deletionProtection: true
+
+# =============================================================================
+# REMOVING (data is never deleted by the operator)
+#   1. Delete the workload first:       kubectl delete deployment my-app -n default
+#   2. Lift protection:                 kubectl patch vs stabilize-my-app-data -n default \
+#                                         --type=merge -p '{"spec":{"deletionProtection":false}}'
+#   3. Delete the CR:                   kubectl delete vs stabilize-my-app-data -n default
+#      -> the stable PVC and the PV are RETAINED and keep the data.
+#   4. Only if you really want the data gone:
+#        kubectl delete pvc my-app-data -n default
+#        kubectl delete pv <pv-name>     # the CSI driver then removes the NFS export
+# =============================================================================
